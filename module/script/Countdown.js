@@ -1,0 +1,342 @@
+/**
+ * ==========================================
+ * 📌 代码名称: ⏳ 节假日倒计时 (时光倒数 · UI 优化版)
+ * ✨ 主要功能: 智能聚合法定/民俗/国际/专属节日；内置春秋假 + 金融交割日(15点后自动取消置顶)；多置顶高亮；今日节日暖色背景；UI 呼吸感全面升级，修复标签间距。
+ * 🔗 引用链接: https://raw.githubusercontent.com/jnlaoshu/MySelf/master/Egern/Widget/Countdown.js
+ * ⏱️ 更新时间: 2026.03.27 (improved)
+ * ==========================================
+ */
+
+export default async function (ctx) {
+  const env = ctx.env || {};
+
+  const showSchoolHolidays = (env.SHOW_SCHOOL_HOLIDAYS || "true").trim() !== "false";
+  const showFinanceDates   = (env.SHOW_FINANCE_DATES   || "true").trim() !== "false";
+
+  const pinnedHolidays = env.PINNED_HOLIDAY !== undefined
+    ? env.PINNED_HOLIDAY.split(',').map(s => s.trim()).filter(Boolean)
+    : ["高考"];
+
+  const springDateStr = (env.SPRING_BREAK_DATE || "").trim();
+  const autumnDateStr = (env.AUTUMN_BREAK_DATE || "").trim();
+
+  // --- [FIX] Simplified env key: always use EXCLUSIVE_NAME_N / EXCLUSIVE_DATE_N ---
+  let customDays = [1, 2, 3, 4, 5, 6].map(i => {
+    const name = (env[`EXCLUSIVE_NAME_${i}`] || (i === 1 ? "我的生日" : "")).trim();
+    const date = (env[`EXCLUSIVE_DATE_${i}`] || (i === 1 ? "11/10" : "")).trim();
+    return { name, date };
+  }).filter(item => item.name && item.date?.includes('/'));
+
+  // --- [FIX] Named constants for magic numbers ---
+  const LABEL_COL_WIDTH       = 54;
+  const EXCLUSIVE_LINE_MAX_W  = 45;
+
+  // --- [FIX] Use device local time directly instead of hardcoded UTC+8 ---
+  const now = new Date();
+  const Y = now.getFullYear(), M = now.getMonth() + 1, D = now.getDate();
+  const currentHour = now.getHours();
+  const todayMs = Date.UTC(Y, M - 1, D);
+  const YMD = (y, m, d) => `${y}/${m < 10 ? '0'+m : m}/${d < 10 ? '0'+d : d}`;
+
+  // ==================== A 股期指交割日推算引擎 ====================
+  if (showFinanceDates) {
+    const getFinanceDate = (y, monthIndex, nth, targetDayOfWeek) => {
+      const firstDay = new Date(Date.UTC(y, monthIndex, 1)).getUTCDay();
+      let diff = targetDayOfWeek - firstDay;
+      if (diff < 0) diff += 7;
+      return Date.UTC(y, monthIndex, 1 + diff + (nth - 1) * 7);
+    };
+
+    let futuresMs = getFinanceDate(Y, M - 1, 3, 5);
+    if (todayMs > futuresMs) futuresMs = getFinanceDate(M === 12 ? Y + 1 : Y, M === 12 ? 0 : M, 3, 5);
+    const futuresDate = new Date(futuresMs);
+    customDays.push({ name: "交割", date: `${futuresDate.getUTCMonth() + 1}/${futuresDate.getUTCDate()}` });
+
+    let optionsMs = getFinanceDate(Y, M - 1, 4, 3);
+    if (todayMs > optionsMs) optionsMs = getFinanceDate(M === 12 ? Y + 1 : Y, M === 12 ? 0 : M, 4, 3);
+    const optionsDate = new Date(optionsMs);
+    customDays.push({ name: "行权", date: `${optionsDate.getUTCMonth() + 1}/${optionsDate.getUTCDate()}` });
+  }
+
+  // ==================== 调色板 ====================
+  const C = {
+    bg:          [{ light: '#FFFFFF', dark: '#1C1C1E' }, { light: '#F5F5F9', dark: '#0C0C0E' }],
+    bgFest:      [{ light: '#FFF8EC', dark: '#2A1F0E' }, { light: '#FFF3E0', dark: '#1F1608' }],
+    main:        { light: '#1C1C1E', dark: '#FFFFFF' },
+    sub:         { light: '#48484A', dark: '#D1D1D6' },
+    muted:       { light: '#8E8E93', dark: '#8E8E93' },
+    gold:        { light: '#B58A28', dark: '#D6A53A' },
+    red:         { light: '#CA3B32', dark: '#FF453A' },
+    blue:        { light: '#3A5F85', dark: '#5E8EB8' },
+    teal:        { light: '#628C7B', dark: '#73A491' },
+    divider:     { light: '#E5E5EA', dark: '#38383A' },
+    transparent: '#00000000'
+  };
+
+  // ==================== 渲染辅助 ====================
+  const mkText   = (text, size, weight, color, opts = {}) => ({
+    type: "text", text: String(text), font: { size, weight }, textColor: color, ...opts
+  });
+  const mkRow    = (children, gap = 4) => ({
+    type: "stack", direction: "row", alignItems: "center", gap, children
+  });
+  const mkSpacer = (length) => length != null ? { type: "spacer", length } : { type: "spacer" };
+  const mkIcon   = (src, color, size = 13) => ({
+    type: "image", src: `sf-symbol:${src}`, color, width: size, height: size
+  });
+
+  // ==================== 农历引擎 ====================
+  const Lunar = {
+    info: [0x04bd8,0x04ae0,0x0a570,0x054d5,0x0d260,0x0d950,0x16554,0x056a0,0x09ad0,0x055d2,0x04ae0,0x0a5b6,0x0a4d0,0x0d250,0x1d255,0x0b540,0x0d6a0,0x0ada2,0x095b0,0x14977,0x04970,0x0a4b0,0x0b4b5,0x06a50,0x06d40,0x1ab54,0x02b60,0x09570,0x052f2,0x04970,0x06566,0x0d4a0,0x0ea50,0x06e95,0x05ad0,0x02b60,0x186e3,0x092e0,0x1c8d7,0x0c950,0x0d4a0,0x1d8a6,0x0b550,0x056a0,0x1a5b4,0x025d0,0x092d0,0x0d2b2,0x0a950,0x0b557,0x06ca0,0x0b550,0x15355,0x04da0,0x0a5b0,0x14573,0x052b0,0x0a9a8,0x0e950,0x06aa0,0x0aea6,0x0ab50,0x04b60,0x0aae4,0x0a570,0x05260,0x0f263,0x0d950,0x05b57,0x056a0,0x096d0,0x04dd5,0x04ad0,0x0a4d0,0x0d4d4,0x0d250,0x0d558,0x0b540,0x0b6a0,0x195a6,0x095b0,0x049b0,0x0a974,0x0a4b0,0x0b27a,0x06a50,0x06d40,0x0af46,0x0ab60,0x09570,0x04af5,0x04970,0x064b0,0x074a3,0x0ea50,0x06b58,0x05ac0,0x0ab60,0x096d5,0x092e0,0x0c960,0x0d954,0x0d4a0,0x0da50,0x07552,0x056a0,0x0abb7,0x025d0,0x092d0,0x0cab5,0x0a950,0x0b4a0,0x0baa4,0x0ad50,0x055d9,0x04ba0,0x0a5b0,0x15176,0x052b0,0x0a930,0x07954,0x06aa0,0x0ad50,0x05b52,0x04b60,0x0a6e6,0x0a4e0,0x0d260,0x0ea65,0x0d530,0x05aa0,0x076a3,0x096d0,0x04afb,0x04ad0,0x0a4d0,0x1d0b6,0x0d250,0x0d520,0x0dd45,0x0b5a0,0x056d0,0x055b2,0x049b0,0x0a577,0x0a4b0,0x0aa50,0x1b255,0x06d20,0x0ada0,0x14b63,0x09370,0x049f8,0x04970,0x064b0,0x168a6,0x0ea50,0x06b20,0x1a6c4,0x0aae0,0x092e0,0x0d2e3,0x0c960,0x0d557,0x0d4a0,0x0da50,0x05d55,0x056a0,0x0a6d0,0x055d4,0x052d0,0x0a9b8,0x0a950,0x0b4a0,0x0b6a6,0x0ad50,0x055a0,0x0aba4,0x0a5b0,0x052b0,0x0b273,0x06930,0x07337,0x06aa0,0x0ad50,0x14b55,0x04b60,0x0a570,0x054e4,0x0d160,0x0e968,0x0d520,0x0daa0,0x16aa6,0x056d0,0x04ae0,0x0a9d4,0x0a2d0,0x0d150,0x0f252,0x0d520],
+    term(y, n) { return new Date((31556925974.7*(y-1900)+[0,21208,42467,63836,85337,107014,128867,150921,173149,195551,218072,240693,263343,285989,308563,331033,353350,375494,397447,419210,440795,462224,483532,504758][n-1]*60000)+Date.UTC(1900,0,6,2,5)); },
+    lDays(y) { let s=348; for(let i=0x8000; i>0x8; i>>=1) s+=((this.info[y-1900] & i) ? 1 : 0); return s + ((this.info[y-1900] & 0xf) ? ((this.info[y-1900]&0x10000)?30:29) : 0); },
+    mDays(y, m) { return (this.info[y-1900] & (0x10000 >> m)) ? 30 : 29; },
+    l2s(y, m, d) {
+      try {
+        let off = 0, lp = this.info[y-1900] & 0xf;
+        for (let i = 1900; i < y; i++) off += this.lDays(i);
+        for (let i = 1; i < m; i++) { off += this.mDays(y, i); if (lp > 0 && i === lp) off += ((this.info[y-1900] & 0x10000) ? 30 : 29); }
+        return new Date(Date.UTC(1900, 0, 31) + (off + d - 1) * 86400000);
+      } catch (_) { return null; }
+    }
+  };
+
+  // ==================== 节日数据生成 ====================
+  const getCustomDate = (y, dateStr, defaultCalc) => {
+    if (!dateStr) return defaultCalc();
+    const [m, d] = dateStr.split('/').map(Number);
+    return (m && d) ? YMD(y, m, d) : defaultCalc();
+  };
+
+  const getFests = (y) => {
+    const l2s  = (m, d) => { const r = Lunar.l2s(y, m, d); return r ? YMD(r.getUTCFullYear(), r.getUTCMonth()+1, r.getUTCDate()) : ""; };
+    const term = (n)    => { const d = Lunar.term(y, n);   return YMD(d.getUTCFullYear(), d.getUTCMonth()+1, d.getUTCDate()); };
+    const wDay = (m, n, w) => { const f = new Date(Date.UTC(y, m-1, 1)), dd = f.getUTCDay(), x = w - dd; return YMD(y, m, 1 + (x < 0 ? x + 7 : x) + (n-1)*7); };
+
+    let legal = [
+      ["元旦",   YMD(y,1,1),  1], ["春节",   l2s(1,1),  3], ["清明节", term(7),   1],
+      ["劳动节", YMD(y,5,1),  1], ["端午节", l2s(5,5),  1], ["儿童节", YMD(y,6,1), 1],
+      ["中秋节", l2s(8,15),   1], ["国庆节", YMD(y,10,1),3]
+    ];
+    if (showSchoolHolidays) {
+      legal.push(["春假", getCustomDate(y, springDateStr, () => { const qm = Lunar.term(y, 7); const sb = new Date(qm.getTime() - 3 * 86400000); return YMD(sb.getUTCFullYear(), sb.getUTCMonth()+1, sb.getUTCDate()); }), 3]);
+      legal.push(["秋假", getCustomDate(y, autumnDateStr, () => { const nov1 = new Date(Date.UTC(y, 10, 1)); const offset = (3 - nov1.getUTCDay() + 7) % 7; return YMD(y, 11, 1 + offset + 7); }), 3]);
+    }
+
+    const exclusive = [
+      ...customDays.map(item => { const [em, ed] = item.date.split('/').map(Number); return [item.name, YMD(y, em, ed), 1]; }),
+      ["高考", YMD(y, 6, 7), 2]
+    ];
+
+    return {
+      legal,
+      folk:  [ ["元宵节",l2s(1,15),1], ["龙抬头",l2s(2,2),1], ["七夕节",l2s(7,7),1], ["中元节",l2s(7,15),1], ["重阳节",l2s(9,9),1], ["寒衣节",l2s(10,1),1], ["腊八节",l2s(12,8),1], ["小年",l2s(12,23),1], ["除夕",l2s(12,Lunar.mDays(y,12)),1] ],
+      intl:  [ ["情人节",YMD(y,2,14),1], ["妇女节",YMD(y,3,8),1], ["母亲节",wDay(5,2,0),1], ["父亲节",wDay(6,3,0),1], ["万圣节",YMD(y,10,31),1], ["感恩节",wDay(11,4,4),1], ["平安夜",YMD(y,12,24),1], ["圣诞节",YMD(y,12,25),1] ],
+      exclusive
+    };
+  };
+
+  // ==================== 数据处理 ====================
+  const result = { legal: [], folk: [], intl: [], exclusive: [] };
+  const todayFests = [], todayFinance = [], pinnedMap = {};
+
+  [getFests(Y), getFests(Y + 1)].forEach(f => {
+    Object.keys(result).forEach(cat => {
+      f[cat].forEach(([name, dateStr, duration]) => {
+        if (!dateStr) return;
+        const [yy, mm, dd] = dateStr.split('/').map(Number);
+        const diff = Math.round((Date.UTC(yy, mm - 1, dd) - todayMs) / 86400000);
+
+        if (diff <= 0) {
+          if (diff > -(duration || 1)) {
+            if (name === "交割" || name === "行权") {
+              if (currentHour < 15 && !todayFinance.includes(name)) todayFinance.push(name);
+            }
+            else {
+              if (!todayFests.includes(name)) todayFests.push(name);
+            }
+          }
+          return;
+        }
+
+        if (pinnedHolidays.includes(name) && diff <= 200) {
+          if (pinnedMap[name] === undefined || diff < pinnedMap[name]) pinnedMap[name] = diff;
+        }
+        if (!result[cat].some(i => i.name === name) && !todayFests.includes(name) && !todayFinance.includes(name)) {
+            result[cat].push({ name, diff });
+        }
+      });
+    });
+  });
+
+  const formatStr = (cat, limit) =>
+    result[cat].sort((a, b) => a.diff - b.diff).slice(0, limit).map(i => `${i.name} ${i.diff}天`).join("，");
+
+  // ==================== 专属节日防爆框智能拆分 ====================
+  const getExclusiveLines = (str) => {
+    if (!str) return [];
+    let firstLine = "", w = 0;
+    const tokens = str.match(/[\d\/a-zA-Z.\-]+|./gu) || [];
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      // --- [FIX] Better CJK width detection ---
+      const tokenW = [...token].reduce((sum, c) => sum + (/[\u2E80-\u9FFF\uF900-\uFAFF]/.test(c) ? 2 : 1.1), 0);
+      if (w + tokenW > EXCLUSIVE_LINE_MAX_W) return [firstLine.replace(/[，\s]+$/, ''), tokens.slice(i).join("").replace(/^[，\s]+/, '')];
+      firstLine += token;
+      w += tokenW;
+    }
+    return [str];
+  };
+
+  // ==================== 行渲染 ====================
+  // --- [FIX] Use empty stack spacer for continuation lines instead of invisible icon+text ---
+  const createRow = (icon, color, title, textStr, isFirst, txtColor = C.sub) => {
+    return {
+      type: 'stack', direction: 'row', alignItems: 'start', gap: 4, children: [
+        ...(isFirst ? [
+          { type: 'stack', direction: 'row', alignItems: 'center', gap: 2, width: LABEL_COL_WIDTH, children: [
+            mkIcon(icon, color),
+            mkText(title, 12, "heavy", color)
+          ]}
+        ] : [
+          { type: 'stack', width: LABEL_COL_WIDTH, children: [] }
+        ]),
+        mkText(textStr, 12, "medium", txtColor, { maxLines: 1, flex: 1 })
+      ]
+    };
+  };
+
+  let gridRows = [];
+
+  const tLegal = formatStr("legal", 3);
+  if (tLegal) gridRows.push(createRow("building.columns.fill", C.red,  "法定", tLegal, true));
+
+  const tFolk = formatStr("folk", 3);
+  if (tFolk)  gridRows.push(createRow("moon.stars.fill",       C.gold, "民俗", tFolk,  true));
+
+  const tIntl = formatStr("intl", 3);
+  if (tIntl)  gridRows.push(createRow("globe.americas.fill",   C.blue, "国际", tIntl,  true));
+
+  const tExc = formatStr("exclusive", 6);
+  if (tExc) {
+    getExclusiveLines(tExc).forEach((line, idx) => {
+      const isAlert = /(交割|行权) [1-2]天/.test(line);
+      gridRows.push(createRow("gift.fill", C.teal, "专属", line, idx === 0, isAlert ? C.red : C.sub));
+    });
+  }
+
+  // ==================== 标题栏附加信息 ====================
+  const topAddons = [];
+  if (todayFests.length > 0) {
+    const shown = todayFests.slice(0, 2).join('·');
+    topAddons.push(`🎉 ${shown}${todayFests.length > 2 ? '…' : ''}`);
+  }
+  if (todayFinance.length > 0) topAddons.push(`🚨 ${todayFinance.join('·')}`);
+
+  const stickyParts = pinnedHolidays
+    .filter(name => pinnedMap[name] !== undefined)
+    .map(name => `${name} ${pinnedMap[name]}天`);
+  if (stickyParts.length > 0) topAddons.push(`🔝 ${stickyParts.join('·')}`);
+
+  const bgColors   = todayFests.length > 0 ? C.bgFest : C.bg;
+  const visualLines = gridRows.length;
+  const dynamicGap = visualLines <= 4 ? 11 : 8;
+
+  // --- [FIX] Smart refreshAfter: next midnight, or 15:00 for finance day ---
+  let refreshAt = new Date(Y, M - 1, D + 1);
+  if (todayFinance.length > 0 && currentHour < 15) {
+    refreshAt = new Date(Y, M - 1, D, 15, 0, 0);
+  }
+
+  // --- [FIX] Adaptive layout based on ctx.widgetFamily ---
+  if (ctx.widgetFamily === 'accessoryRectangular') {
+    const allSorted = [...result.legal, ...result.folk, ...result.intl, ...result.exclusive]
+      .sort((a, b) => a.diff - b.diff);
+    const nearest = allSorted[0];
+    return {
+      type: 'widget', padding: 4,
+      children: [
+        mkText('时光倒数', 'headline', 'bold', '#FFFFFF'),
+        mkText(nearest ? `${nearest.name} ${nearest.diff}天` : '暂无即将到来的节日', 'caption1', 'medium', '#FFFFFFCC')
+      ]
+    };
+  }
+
+  if (ctx.widgetFamily === 'accessoryCircular') {
+    const allSorted = [...result.legal, ...result.folk, ...result.intl, ...result.exclusive]
+      .sort((a, b) => a.diff - b.diff);
+    const nearest = allSorted[0];
+    return {
+      type: 'widget', padding: 2,
+      children: [
+        mkText(nearest ? `${nearest.diff}` : '-', 'title1', 'bold', '#FFFFFF'),
+        mkText(nearest ? nearest.name : '', 'caption2', 'medium', '#FFFFFFCC')
+      ]
+    };
+  }
+
+  if (ctx.widgetFamily === 'accessoryInline') {
+    const allSorted = [...result.legal, ...result.folk, ...result.intl, ...result.exclusive]
+      .sort((a, b) => a.diff - b.diff);
+    const nearest = allSorted[0];
+    return {
+      type: 'widget',
+      children: [
+        mkText(nearest ? `${nearest.name} ${nearest.diff}天` : '暂无节日', 'body', 'medium', '#FFFFFF')
+      ]
+    };
+  }
+
+  if (ctx.widgetFamily === 'systemSmall') {
+    const allSorted = [...result.legal, ...result.folk, ...result.intl, ...result.exclusive]
+      .sort((a, b) => a.diff - b.diff).slice(0, 4);
+    return {
+      type: 'widget', padding: 12,
+      refreshAfter: refreshAt.toISOString(),
+      backgroundGradient: { type: 'linear', colors: bgColors, startPoint: { x: 0, y: 0 }, endPoint: { x: 1, y: 1 } },
+      children: [
+        mkRow([
+          mkIcon('hourglass.circle.fill', C.main, 15),
+          mkText('时光倒数', 14, "heavy", C.main)
+        ], 4),
+        mkSpacer(6),
+        ...allSorted.map(i => mkRow([
+          mkText(i.name, 12, "bold", C.gold),
+          mkSpacer(),
+          mkText(`${i.diff}天`, 12, "medium", C.sub)
+        ], 4)),
+        ...(allSorted.length === 0 ? [mkText('暂无即将到来的节日', 12, 'medium', C.muted)] : []),
+        mkSpacer()
+      ]
+    };
+  }
+
+  // ==================== 主布局 (systemMedium / systemLarge) ====================
+  return {
+    type: 'widget',
+    padding: 12,
+    refreshAfter: refreshAt.toISOString(),
+    backgroundGradient: { type: 'linear', colors: bgColors, startPoint: { x: 0, y: 0 }, endPoint: { x: 1, y: 1 } },
+    children: [
+
+      // 标题栏
+      mkRow([
+        mkIcon('hourglass.circle.fill', C.main, 17),
+        mkText('时光倒数', 15, "heavy", C.main),
+        mkSpacer(),
+        mkText(topAddons.join("  |  "), 11.5, "bold", C.red, { maxLines: 1, minScale: 0.75 })
+      ], 5),
+
+      mkSpacer(visualLines <= 4 ? 12 : 10),
+
+      // --- [FIX] Empty state fallback ---
+      { type: 'stack', direction: 'column', alignItems: 'start', gap: dynamicGap,
+        children: gridRows.length > 0 ? gridRows : [
+          mkText('暂无即将到来的节日', 12, 'medium', C.muted)
+        ]
+      },
+
+      mkSpacer()
+    ]
+  };
+}
